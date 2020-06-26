@@ -3,20 +3,23 @@
 ### Takes in VCF file and a samtools mpileup output file
 ### Fills in annotation for the VCF file including AF, DP
 ### SB, and DP4
-
+###
+### Usage statement:
+### python annotateVCF.py in_vcf.vcf in_mpileup.txt out_vcf.vcf
+###
+### Can generate in_mileup.txt with samtools mpileup (and can restrict which sites to generate pileups for with in_vcf.vcf)
 
 ### 06/18/2020 - Nathan P. Roach
 ### Written in the employ of GalaxyWorks LLC
 
 import sys
-from math import log10
-import scipy
-# from scipy.stats import fisher_exact
+from math import log10,isnan
+from scipy.stats import fisher_exact
 
 def pval_to_phredqual(pval):
     return int(round(-10. * log10(pval)))
 
-def parseSimpleSNPpileup(fields,ref_base,alt_base,stranded_threshold):
+def parseSimpleSNPpileup(fields,ref_base,alt_base):
     base_to_idx = {
         'A' : 0,
         'a' : 0,
@@ -115,16 +118,10 @@ def parseSimpleSNPpileup(fields,ref_base,alt_base,stranded_threshold):
             stranded_counts[base_to_idx_stranded[ref_base.lower()]],
             stranded_counts[base_to_idx_stranded[alt_base]],
             stranded_counts[base_to_idx_stranded[alt_base.lower()]]]
-    # print(af)
-    # print(fwd_af)
-    # print(rev_af)
-    stranded = abs(faf - raf) > stranded_threshold
-    # print(stranded)
-    # print(counts)
     
     return (dp,af,faf,raf,dp4)
 
-def parseIndelPileup(fields,ref_base,alt_base,stranded_threshold):
+def parseIndelPileup(fields,ref_base,alt_base):
     counts = [0,0,0,0,0,0,0,0,0] # indel ref match, indel fwd ref match, indel rev ref match, indel alt match, indel fwd alt match, indel rev alt match, other, other fwd, other rev
     ref_base2 = fields[2]
 
@@ -295,16 +292,23 @@ def parseIndelPileup(fields,ref_base,alt_base,stranded_threshold):
                 counts[8] += 1
     dp = int(fields[3])
     af = float(counts[3]) / float(sum([counts[0],counts[3],counts[6]]))
-    faf = float(counts[4]) / float(sum([counts[1],counts[4],counts[7]]))
-    raf = float(counts[5]) / float(sum([counts[2],counts[5],counts[8]]))
+    if sum([counts[1],counts[4],counts[7]]) == 0:
+        faf = float("nan")
+    else:
+        faf = float(counts[4]) / float(sum([counts[1],counts[4],counts[7]]))
+    if sum([counts[2],counts[5],counts[8]]) == 0:
+        raf = float("nan")
+    else:
+        raf = float(counts[5]) / float(sum([counts[2],counts[5],counts[8]]))
     dp4 = [counts[1],counts[2],counts[4],counts[5]]
     return (dp,af,faf,raf,dp4)
 
-def annotateVCF(in_vcf_filepath,in_mpileup_filepath,out_vcf_filepath,stranded_threshold = 0.3):
+def annotateVCF(in_vcf_filepath,in_mpileup_filepath,out_vcf_filepath):
     in_vcf = open(in_vcf_filepath, 'r')
     in_mpileup = open(in_mpileup_filepath,'r')
     out_vcf = open(out_vcf_filepath,'w')
 
+    #First pass parsing of input vcf, output headerlines + new headerlines, add VCF sites we care about to to_examine (limits memory usage for sites that don't need annotation)
     to_examine = {}
     for line in in_vcf:
         if line[0:2] == "##":
@@ -315,7 +319,7 @@ def annotateVCF(in_vcf_filepath,in_mpileup_filepath,out_vcf_filepath,stranded_th
             out_vcf.write("##INFO=<ID=AF,Number=1,Type=Float,Description=\"Allele Frequency\">\n")
             out_vcf.write("##INFO=<ID=FAF,Number=1,Type=Float,Description=\"Forward Allele Frequency\">\n")
             out_vcf.write("##INFO=<ID=RAF,Number=1,Type=Float,Description=\"Reverse Allele Frequency\">\n")
-            out_vcf.write("##INFO=<ID=SB,Number=1,Type=Integer,Description=\"Phred-scaled strand bias at this position\">")
+            out_vcf.write("##INFO=<ID=SB,Number=1,Type=Integer,Description=\"Phred-scaled strand bias at this position\">\n")
             out_vcf.write("##INFO=<ID=DP4,Number=4,Type=Integer,Description=\"Counts for ref-forward bases, ref-reverse, alt-forward and alt-reverse bases\">\n")
             out_vcf.write(line)
         else:
@@ -327,12 +331,17 @@ def annotateVCF(in_vcf_filepath,in_mpileup_filepath,out_vcf_filepath,stranded_th
     in_vcf.close()
     data = {}
 
-    # print(to_examine)
+    #Populate data dictionary, which relates chromosome and position to the following:
+    # depth of coverage
+    # allele frequency
+    # forward strand allele frequency
+    # reverse strand allele frequency
+    # dp4 - depth of coverage of ref allele fwd strand, DOC of ref allele rev strand, DOC of alt allele fwd strand, DOC of alt allele rev strand
     for line in in_mpileup:
         fields = line.strip().split()
         if fields[0] not in to_examine:
             continue
-        if int(fields[1]) not in to_examine[fields[0]]:
+        if int(fields[1]) not in to_examine[fields[0]]: #
             continue
         (ref_base,alt_base) = to_examine[fields[0]][int(fields[1])]
         if len(ref_base.split(',')) > 1: # Can't handle multiple ref alleles
@@ -342,11 +351,13 @@ def annotateVCF(in_vcf_filepath,in_mpileup_filepath,out_vcf_filepath,stranded_th
         if len(ref_base) > 1 or len(alt_base) > 1:
             if len(ref_base) > 1 and len(alt_base) > 1: # Can't handle complex indels
                 continue
-            data[(fields[0],int(fields[1]))] = parseIndelPileup(fields,ref_base,alt_base,stranded_threshold)
+            data[(fields[0],int(fields[1]))] = parseIndelPileup(fields,ref_base,alt_base)
         if len(ref_base) == 1 and len(alt_base) == 1:
-            data[(fields[0],int(fields[1]))] = parseSimpleSNPpileup(fields,ref_base,alt_base,stranded_threshold)
+            data[(fields[0],int(fields[1]))] = parseSimpleSNPpileup(fields,ref_base,alt_base)
         
     in_mpileup.close()
+    #Reopen vcf, this time, skip header, annotate all the sites for which there is an entry in data dictionary
+    #(Sites without entries have either multiple ref or alt bases, or have complex indels. Not supported (for now), and not reported as a result)
     in_vcf = open(in_vcf_filepath,'r')
     for line in in_vcf:
         if line[0] == '#':
@@ -364,8 +375,14 @@ def annotateVCF(in_vcf_filepath,in_mpileup_filepath,out_vcf_filepath,stranded_th
             info = fields[7].split(';')
         info.append("DP=%d" %(dp))
         info.append("AF=%.6f" %(af))
-        info.append("FAF=%.6f" %(faf))
-        info.append("RAF=%.6f" %(raf))
+        if isnan(faf):
+            info.append("FAF=NaN")
+        else:
+            info.append("FAF=%.6f" %(faf))
+        if isnan(raf):
+            info.append("RAF=NaN")
+        else:
+            info.append("RAF=%.6f" %(raf))
         info.append("SB=%d" %(sb))
         info.append("DP4=%s"%(','.join([str(x) for x in dp4])))
         new_info = ';'.join(info)
@@ -375,4 +392,4 @@ def annotateVCF(in_vcf_filepath,in_mpileup_filepath,out_vcf_filepath,stranded_th
     out_vcf.close()
 
 if __name__ == "__main__":
-    annotateVCF(sys.argv[1],sys.argv[2],sys.argv[3])
+    annotateVCF(sys.argv[1],sys.argv[2],sys.argv[3]) #
